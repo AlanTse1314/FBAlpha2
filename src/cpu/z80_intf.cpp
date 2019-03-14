@@ -21,7 +21,8 @@ struct ZetExt {
 	pZetReadHandler ZetRead;
 	pZetWriteHandler ZetWrite;
 	
-	UINT8 BusReq;
+	UINT32 BusReq;
+	UINT32 ResetLine;
 };
  
 static INT32 nZetCyclesDone[MAX_Z80];
@@ -216,7 +217,8 @@ INT32 ZetInit(INT32 nCPU)
 		ZetCPUContext[nCPU]->ZetRead = ZetDummyReadHandler;
 		ZetCPUContext[nCPU]->ZetWrite = ZetDummyWriteHandler;
 		ZetCPUContext[nCPU]->BusReq = 0;
-		// TODO: Z80Init() will set IX IY F regs with default value, so get them ...
+		ZetCPUContext[nCPU]->ResetLine = 0;
+		// Z80Init() will set IX IY F regs with default value, so get them ...
 		Z80GetContext(&ZetCPUContext[nCPU]->reg);
 		
 		nZetCyclesDone[nCPU] = 0;
@@ -265,6 +267,7 @@ INT32 ZetInit(INT32 nCount)
 		ZetCPUContext[i].ZetRead = ZetDummyReadHandler;
 		ZetCPUContext[i].ZetWrite = ZetDummyWriteHandler;
 		ZetCPUContext[i].BusReq = 0;
+		ZetCPUContext[i].ResetLine = 0;
 		// TODO: Z80Init() will set IX IY F regs with default value, so get them ...
 		Z80GetContext(&ZetCPUContext[i].reg);
 		
@@ -362,6 +365,19 @@ void ZetOpen(INT32 nCPU)
 	nOpenedCPU = nCPU;
 }
 
+void ZetSwapActive(INT32 nCPU)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetSwapActive called without init\n"));
+	if (nCPU >= nCPUCount) bprintf(PRINT_ERROR, _T("ZetSwapActive called with invalid index %x\n"), nCPU);
+#endif
+
+	if (ZetGetActive() != -1)
+		ZetClose();
+
+	ZetOpen(nCPU);
+}
+
 INT32 ZetGetActive()
 {
 #if defined FBA_DEBUG
@@ -370,6 +386,23 @@ INT32 ZetGetActive()
 #endif
 
 	return nOpenedCPU;
+}
+
+// ## ZetCPUPush() / ZetCPUPop() ## internal helpers for sending signals to other Z80's
+static INT32 nHostCPU;
+
+static void ZetCPUPush(INT32 nCPU)
+{
+	nHostCPU = ZetGetActive();
+	if (nHostCPU != -1) ZetClose();
+
+	ZetOpen(nCPU);
+}
+
+static void ZetCPUPop()
+{
+	ZetClose();
+	if (nHostCPU != -1) ZetOpen(nHostCPU);
 }
 
 INT32 ZetRun(INT32 nCycles)
@@ -388,19 +421,30 @@ INT32 ZetRun(INT32 nCycles)
 		nCycles -= nDelayed;
 	}
 
-	if (ZetCPUContext[nOpenedCPU]->BusReq) {
-		nCycles += nDelayed;
-		nZetCyclesTotal += nCycles;
-		return nCycles;
+	if (!ZetCPUContext[nOpenedCPU]->BusReq && !ZetCPUContext[nOpenedCPU]->ResetLine) {
+		nCycles = Z80Execute(nCycles);
 	}
-
-	nCycles = Z80Execute(nCycles);
 
 	nCycles += nDelayed;
 
 	nZetCyclesTotal += nCycles;
 	
 	return nCycles;
+}
+
+INT32 ZetRun(INT32 nCPU, INT32 nCycles)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetRun called without init\n"));
+#endif
+
+	ZetCPUPush(nCPU);
+
+	INT32 nRet = ZetRun(nCycles);
+
+	ZetCPUPop();
+
+	return nRet;
 }
 
 void ZetRunAdjust(INT32 /*nCycles*/)
@@ -579,6 +623,19 @@ void ZetReset()
 	Z80Reset();
 }
 
+void ZetReset(INT32 nCPU)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetReset called without init\n"));
+#endif
+
+	ZetCPUPush(nCPU);
+
+	ZetReset();
+
+	ZetCPUPop();
+}
+
 UINT32 ZetGetPC(INT32 n)
 {
 #if defined FBA_DEBUG
@@ -698,6 +755,7 @@ INT32 ZetScan(INT32 nAction)
 		SCAN_VAR(nZetCyclesDone[i]);
 		SCAN_VAR(nZetCyclesDelayed[i]);
 		SCAN_VAR(ZetCPUContext[i]->BusReq);
+		SCAN_VAR(ZetCPUContext[i]->ResetLine);
 	}
 	
 	SCAN_VAR(nZetCyclesTotal);
@@ -732,6 +790,32 @@ void ZetSetIRQLine(const INT32 line, const INT32 status)
 	}
 }
 
+void ZetSetIRQLine(INT32 nCPU, const INT32 line, const INT32 status)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetSetIRQLine called without init\n"));
+#endif
+
+	ZetCPUPush(nCPU);
+
+	ZetSetIRQLine(line, status);
+
+	ZetCPUPop();
+}
+
+void ZetSetVector(INT32 nCPU, INT32 vector)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetSetVector called without init\n"));
+#endif
+
+	ZetCPUPush(nCPU);
+
+	ZetSetVector(vector);
+
+	ZetCPUPop();
+}
+
 void ZetSetVector(INT32 vector)
 {
 #if defined FBA_DEBUG
@@ -763,6 +847,21 @@ INT32 ZetNmi()
 	nZetCyclesDelayed[nOpenedCPU] += Z80Execute(0);
 	Z80SetIrqLine(Z80_INPUT_LINE_NMI, 0);
 	nZetCyclesDelayed[nOpenedCPU] += Z80Execute(0);
+
+	return 0;
+}
+
+INT32 ZetNmi(INT32 nCPU)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetNmi called without init\n"));
+#endif
+
+	ZetCPUPush(nCPU);
+
+	ZetNmi();
+
+	ZetCPUPop();
 
 	return 0;
 }
@@ -809,6 +908,55 @@ void ZetSetBUSREQLine(INT32 nStatus)
 	if (nOpenedCPU < 0) return;
 	
 	ZetCPUContext[nOpenedCPU]->BusReq = nStatus;
+}
+
+INT32 ZetGetBUSREQLine()
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetGetBUSREQ called without init\n"));
+	if (nOpenedCPU == -1) bprintf(PRINT_ERROR, _T("ZetGetBUSREQ called when no CPU open\n"));
+#endif
+
+	return ZetCPUContext[nOpenedCPU]->BusReq;
+}
+
+void ZetSetRESETLine(INT32 nStatus)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetSetRESETLine called without init\n"));
+	if (nOpenedCPU == -1) bprintf(PRINT_ERROR, _T("ZetSetRESETLine called when no CPU open\n"));
+#endif
+
+	if (nOpenedCPU < 0) return;
+
+	if (ZetCPUContext[nOpenedCPU]->ResetLine && nStatus == 0) {
+		ZetReset();
+	}
+
+	ZetCPUContext[nOpenedCPU]->ResetLine = nStatus;
+}
+
+void ZetSetRESETLine(INT32 nCPU, INT32 nStatus)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetSetRESETLine called without init\n"));
+#endif
+
+	ZetCPUPush(nCPU);
+
+	ZetSetRESETLine(nStatus);
+
+	ZetCPUPop();
+}
+
+INT32 ZetGetRESETLine()
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetGetRESET called without init\n"));
+	if (nOpenedCPU == -1) bprintf(PRINT_ERROR, _T("ZetGetRESET called when no CPU open\n"));
+#endif
+
+	return ZetCPUContext[nOpenedCPU]->ResetLine;
 }
 
 void ZetSetAF(INT32 n, UINT16 value)
