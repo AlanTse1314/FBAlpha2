@@ -207,9 +207,7 @@ INT32 ZetInit(INT32 nCPU)
 	ZetCPUContext[nCPU] = (struct ZetExt*)BurnMalloc(sizeof(ZetExt));
 	memset (ZetCPUContext[nCPU], 0, sizeof(ZetExt));
 
-	if (nCPU == 0) { // not safe!
-		Z80Init();
-	}
+    Z80Init(); // clear/init next z80 slot (internal to z80.cpp)
 
 	{
 		ZetCPUContext[nCPU]->ZetIn = ZetDummyInHandler;
@@ -247,57 +245,6 @@ INT32 ZetInit(INT32 nCPU)
 
 	return 0;
 }
-
-#if 0
-INT32 ZetInit(INT32 nCount)
-{
-	DebugCPU_ZetInitted = 1;
-
-	nOpenedCPU = -1;
-	
-	ZetCPUContext = (struct ZetExt *) malloc(nCount * sizeof(ZetExt));
-	if (ZetCPUContext == NULL) return 1;
-	memset(ZetCPUContext, 0, nCount * sizeof(ZetExt));
-	
-	Z80Init();
-	
-	for (INT32 i = 0; i < nCount; i++) {
-		ZetCPUContext[i].ZetIn = ZetDummyInHandler;
-		ZetCPUContext[i].ZetOut = ZetDummyOutHandler;
-		ZetCPUContext[i].ZetRead = ZetDummyReadHandler;
-		ZetCPUContext[i].ZetWrite = ZetDummyWriteHandler;
-		ZetCPUContext[i].BusReq = 0;
-		ZetCPUContext[i].ResetLine = 0;
-		// TODO: Z80Init() will set IX IY F regs with default value, so get them ...
-		Z80GetContext(&ZetCPUContext[i].reg);
-		
-		nZetCyclesDone[i] = 0;
-		nZ80ICount[i] = 0;
-		
-		for (INT32 j = 0; j < (0x0100 * 4); j++) {
-			ZetCPUContext[i].pZetMemMap[j] = NULL;
-		}
-	}
-	
-	nZetCyclesTotal = 0;
-	
-	Z80SetIOReadHandler(ZetReadIO);
-	Z80SetIOWriteHandler(ZetWriteIO);
-	Z80SetProgramReadHandler(ZetReadProg);
-	Z80SetProgramWriteHandler(ZetWriteProg);
-	Z80SetCPUOpReadHandler(ZetReadOp);
-	Z80SetCPUOpArgReadHandler(ZetReadOpArg);
-	
-	nCPUCount = nCount % MAX_Z80;
-
-	nHasZet = nCount;
-
-	for (INT32 i = 0; i < nCount; i++)
-		CpuCheatRegister(0x0004, i);
-
-	return 0;
-}
-#endif
 
 UINT8 ZetReadByte(UINT16 address)
 {
@@ -502,7 +449,11 @@ void ZetExit()
 
 	if (!DebugCPU_ZetInitted) return;
 
-	Z80Exit();
+    for (INT32 i = 0; i < nCPUCount; i++) {
+        ZetOpen(i);
+        Z80Exit(); // exit daisy chain & peripherals attached to this cpu.
+        ZetClose();
+    }
 
 	for (INT32 i = 0; i < MAX_Z80; i++) {
 		if (ZetCPUContext[i]) {
@@ -760,7 +711,23 @@ INT32 ZetScan(INT32 nAction)
 	
 	SCAN_VAR(nZetCyclesTotal);
 
+    for (INT32 i = 0; i < nCPUCount; i++) {
+        ZetOpen(i);
+        Z80Scan(nAction); // scan daisy chain & peripherals attached to this cpu.
+        ZetClose();
+    }
+
 	return 0;
+}
+
+void ZetDaisyInit(INT32 dev0, INT32 dev1)
+{
+#if defined FBA_DEBUG
+	if (!DebugCPU_ZetInitted) bprintf(PRINT_ERROR, _T("ZetDaisyInit called without init\n"));
+	if (nOpenedCPU == -1) bprintf(PRINT_ERROR, _T("ZetDaisyInit called when no CPU open\n"));
+#endif
+
+    z80daisy_init(dev0, dev1);
 }
 
 void ZetSetIRQLine(const INT32 line, const INT32 status)
